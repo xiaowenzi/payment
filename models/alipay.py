@@ -144,18 +144,15 @@ class AcquirerAlipay(osv.Model):
 
         alipay_tx_values = dict(tx_values)
         alipay_tx_values.update({
-            'service': 'trade_create_by_buyer',
+            'service': 'create_direct_pay_by_user',
             'partner': acquirer.alipay_partner_account,
             'seller_email': acquirer.alipay_seller_email,
             '_input_charset': 'utf-8',
             'out_trade_no': tx_values['reference'],
             'subject': tx_values['reference'],
-            'payment_type': '1',
-            'logistics_type': 'EXPRESS',
-            'logistics_fee': 0,
-            'logistics_payment': 'SELLER_PAY',
-            'price': tx_values['amount'],
-            'quantity': 1,
+            'payment_type': '1',            
+            'total_fee': tx_values['amount'],
+            'seller_id':acquirer.alipay_partner_account,            
             'body': '%s: %s' % (acquirer.company_id.name, tx_values['reference']),
             'return_url': '%s' % urlparse.urljoin(base_url, AlipayController._return_url),
             'notify_url': '%s' % urlparse.urljoin(base_url, AlipayController._notify_url),
@@ -215,13 +212,9 @@ class TxAlipay(osv.Model):
             'alipay_txn_type': data.get('payment_type'),
             'partner_reference': data.get('buyer_id')
         }
-        if status in ['WAIT_SELLER_SEND_GOODS']:
+        if status in ['TRADE_FINISHED','TRADE_SUCCESS']:
             _logger.info('Validated Alipay payment for tx %s: set as done' % (tx.reference))
-            data.update(state='done', date_validate=data.get('gmt_payment', fields.datetime.now()))
-            return tx.write(data)
-        elif status in ['WAIT_BUYER_PAY']:
-            _logger.info('Received notification for Alipay payment %s: set as pending' % (tx.reference))
-            data.update(state='pending', state_message=data.get('pending_reason', ''))
+            data.update(state='done', date_validate=data.get('notify_time', fields.datetime.now()))
             return tx.write(data)
         else:
             error = 'Received unrecognized status for Alipay payment %s: %s, set as error' % (tx.reference, status)
