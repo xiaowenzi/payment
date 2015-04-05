@@ -156,25 +156,23 @@ class AcquirerAlipay(osv.Model):
             'logistics_payment':'SELLER_PAY',
             'price':tx_values['amount'],
             'quantity':1,
-            'total_fee': tx_values['amount'],
+            'body': '%s: %s' % (acquirer.company_id.name, tx_values['reference']),
             'return_url': '%s' % urlparse.urljoin(base_url, AlipayController._return_url),
             'notify_url': '%s' % urlparse.urljoin(base_url, AlipayController._notify_url),
         })
-        if acquirer.fees_active:
-            alipay_tx_values['handling'] = '%.2f' % alipay_tx_values.pop('fees', 0.0)
-        if alipay_tx_values.get('return_url'):
-            alipay_tx_values['custom'] = json.dumps({'return_url': '%s' % alipay_tx_values.pop('return_url')})
-
-        context['_alipay_tx_values'] = alipay_tx_values
-        return partner_values, alipay_tx_values
-
-    def alipay_get_form_action_url(self, cr, uid, id, context=None):
-        acquirer = self.browse(cr, uid, id, context=context)
-        params = context['_alipay_tx_values']
+        params = alipay_tx_values
         params,prestr = params_filter(params)
         params['sign'] = build_mysign(prestr, acquirer.alipay_partner_key, 'MD5')
         params['sign_type'] = 'MD5'
 
+        alipay_tx_values = params
+        return partner_values, alipay_tx_values
+
+    def alipay_get_form_action_url(self, cr, uid, id, context=None):
+        acquirer = self.browse(cr, uid, id, context=context)
+        params = {
+            '_input_charset': 'utf-8',
+        }
         return self._get_alipay_urls(cr, uid, acquirer.environment, context=context)['alipay_url'] + urlencode(params)
 
 class TxAlipay(osv.Model):
@@ -190,7 +188,7 @@ class TxAlipay(osv.Model):
     # --------------------------------------------------
 
     def _alipay_form_get_tx_from_data(self, cr, uid, data, context=None):
-        reference, txn_id = data.get('item_number'), data.get('txn_id')
+        reference, txn_id = data.get('out_trade_no'), data.get('trade_no')
         if not reference or not txn_id:
             error_msg = 'Alipay: received data with missing reference (%s) or txn_id (%s)' % (reference, txn_id)
             _logger.error(error_msg)
@@ -208,51 +206,19 @@ class TxAlipay(osv.Model):
             raise ValidationError(error_msg)
         return self.browse(cr, uid, tx_ids[0], context=context)
 
-    def _alipay_form_get_invalid_parameters(self, cr, uid, tx, data, context=None):
-        invalid_parameters = []
-        if data.get('notify_version')[0] != '3.4':
-            _logger.warning(
-                'Received a notification from Alipay with version %s instead of 2.6. This could lead to issues when managing it.' %
-                data.get('notify_version')
-            )
-        if data.get('test_ipn'):
-            _logger.warning(
-                'Received a notification from Alipay using sandbox'
-            ),
-
-        # TODO: txn_id: shoudl be false at draft, set afterwards, and verified with txn details
-        if tx.acquirer_reference and data.get('txn_id') != tx.acquirer_reference:
-            invalid_parameters.append(('txn_id', data.get('txn_id'), tx.acquirer_reference))
-        # check what is buyed
-        if float_compare(float(data.get('mc_gross', '0.0')), (tx.amount + tx.fees), 2) != 0:
-            invalid_parameters.append(('mc_gross', data.get('mc_gross'), '%.2f' % tx.amount))  # mc_gross is amount + fees
-        if data.get('mc_currency') != tx.currency_id.name:
-            invalid_parameters.append(('mc_currency', data.get('mc_currency'), tx.currency_id.name))
-        if 'handling_amount' in data and float_compare(float(data.get('handling_amount')), tx.fees, 2) != 0:
-            invalid_parameters.append(('handling_amount', data.get('handling_amount'), tx.fees))
-        # check buyer
-        if tx.partner_reference and data.get('payer_id') != tx.partner_reference:
-            invalid_parameters.append(('payer_id', data.get('payer_id'), tx.partner_reference))
-        # check seller
-        if data.get('receiver_email') != tx.acquirer_id.alipay_partner_account:
-            invalid_parameters.append(('receiver_email', data.get('receiver_email'), tx.acquirer_id.alipay_partner_account))
-        if data.get('receiver_id') and tx.acquirer_id.alipay_seller_email and data['receiver_id'] != tx.acquirer_id.alipay_seller_email:
-            invalid_parameters.append(('receiver_id', data.get('receiver_id'), tx.acquirer_id.alipay_seller_email))
-
-        return invalid_parameters
-
     def _alipay_form_validate(self, cr, uid, tx, data, context=None):
-        status = data.get('payment_status')
+        status = data.get('trade_status')
         data = {
-            'acquirer_reference': data.get('txn_id'),
+            'acquirer_reference': data.get('out_trade_no'),
+            'alipay_txn_id': data.get('trade_no'),
             'alipay_txn_type': data.get('payment_type'),
-            'partner_reference': data.get('payer_id')
+            'partner_reference': data.get('buyer_id')
         }
-        if status in ['Completed', 'Processed']:
+        if status in ['WAIT_SELLER_SEND_GOODS']:
             _logger.info('Validated Alipay payment for tx %s: set as done' % (tx.reference))
-            data.update(state='done', date_validate=data.get('payment_date', fields.datetime.now()))
+            data.update(state='done', date_validate=data.get('gmt_payment', fields.datetime.now()))
             return tx.write(data)
-        elif status in ['Pending', 'Expired']:
+        elif status in ['WAIT_BUYER_PAY']:
             _logger.info('Received notification for Alipay payment %s: set as pending' % (tx.reference))
             data.update(state='pending', state_message=data.get('pending_reason', ''))
             return tx.write(data)
